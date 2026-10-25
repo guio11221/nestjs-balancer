@@ -1,0 +1,7 @@
+src/
+test/
+examples/
+skills/
+.github/
+node_modules/
+*.zip

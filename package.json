@@ -1,0 +1,51 @@
+{
+  "name": "nestjs-balancer",
+  "version": "0.4.0",
+  "description": "NestJS route load balancer: HTTP/1.1 proxy, WebSocket upgrade, h2c gateway, circuit breaker and metrics",
+  "license": "MIT",
+  "author": "Community",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "npm run test:unit && npm run test:integration && npm run test:transport",
+    "check": "npm run typecheck && npm run build && npm test",
+    "pack:check": "npm pack --dry-run",
+    "test:integration": "node --test test/integration/*.test.cjs",
+    "test:unit": "node --test test/*.test.cjs",
+    "test:transport": "node --test test/transports/*.test.cjs"
+  },
+  "peerDependencies": {
+    "@nestjs/common": "^10.0.0 || ^11.0.0",
+    "@nestjs/core": "^10.0.0 || ^11.0.0",
+    "reflect-metadata": "^0.1.13 || ^0.2.0"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "express": "^5.0.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.0",
+    "typescript": "^5.7.0"
+  }
+}
