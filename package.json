@@ -4,8 +4,27 @@
   "description": "NestJS route load balancer: HTTP/1.1 proxy, WebSocket upgrade, h2c gateway, circuit breaker and metrics",
   "license": "MIT",
   "author": "Community",
+  "keywords": [
+    "nestjs",
+    "load-balancer",
+    "reverse-proxy",
+    "circuit-breaker",
+    "gateway",
+    "http2",
+    "websocket",
+    "express"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/guio11221/nestjs-balancer.git"
+  },
+  "homepage": "https://github.com/guio11221/nestjs-balancer#readme",
+  "bugs": {
+    "url": "https://github.com/guio11221/nestjs-balancer/issues"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "sideEffects": false,
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -27,6 +46,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "npm run test:unit && npm run test:integration && npm run test:transport",
     "check": "npm run typecheck && npm run build && npm test",
+    "prepublishOnly": "npm run check",
     "pack:check": "npm pack --dry-run",
     "test:integration": "node --test test/integration/*.test.cjs",
     "test:unit": "node --test test/*.test.cjs",
