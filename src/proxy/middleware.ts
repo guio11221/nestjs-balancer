@@ -177,13 +177,17 @@ export class RouteBalancerMiddleware implements NestMiddleware {
       const fail = (): void => {
         if (recordedFailure || completed || clientAborted) return;
         recordedFailure = true;
-        this.balancer.failure(route, upstream);
+        try { this.balancer.failure(route, upstream); } catch {}
         clearAttempt();
-        if (attempts < maxAttempts && !response.headersSent && !response.destroyed) {
+        if (attempts < maxAttempts && !response.headersSent && !response.destroyed && !completed) {
           const retryCfg = route.config.retry || {};
           const backoff = computeBackoff(retryCfg.backoffMs ?? 25, attempts, retryCfg.jitterMs ?? 0);
-          // simple retry budget not enforced here yet - will be added in service
           backoffTimer = setTimeout(attempt, backoff);
+          return;
+        }
+        if (response.headersSent || response.destroyed) {
+          finish();
+          try { response.destroy(); } catch {}
           return;
         }
         terminate(502, 'Bad gateway');
@@ -195,71 +199,99 @@ export class RouteBalancerMiddleware implements NestMiddleware {
         headers,
         agent: destination.protocol === 'https:' ? this.balancer.httpsAgent : this.balancer.httpAgent,
       }, incoming => {
-        if (completed) {
-          incoming.destroy();
+        if (completed || response.headersSent || response.destroyed) {
+          try { incoming.destroy(); } catch {}
           return;
         }
         headersReceived = true;
-        // Response headers can arrive before a stalled or aborted response body.
-        // Only mark success once the complete upstream stream has been received.
-        response.writeHead(incoming.statusCode ?? 502, sanitizeHeaders(incoming.headers));
-        response.setHeader('x-request-id', requestId);
+        try {
+          if (response.headersSent || response.destroyed) {
+            try { incoming.destroy(); } catch {}
+            return;
+          }
+          const responseHeaders = sanitizeHeaders(incoming.headers);
+          responseHeaders['x-request-id'] = requestId;
+          response.writeHead(incoming.statusCode ?? 502, responseHeaders);
+        } catch {
+          try { incoming.destroy(); } catch {}
+          return;
+        }
         incoming.once('end', () => {
           if (!recordedFailure && !completed) {
             const durationMs = Date.now() - startTime;
-            this.balancer.success(upstream);
+            try { this.balancer.success(upstream); } catch {}
             try { (this.balancer as any).recordLatency?.(upstream, durationMs); } catch {}
-            try { (route.config as any).onRequestComplete?.({ requestId, method, path: requested.pathname, upstream: upstream.url, status: response.statusCode, durationMs }); } catch {}
+            try {
+              if (!response.destroyed) {
+                (route.config as any).onRequestComplete?.({ requestId, method, path: requested.pathname, upstream: upstream.url, status: response.statusCode, durationMs });
+              }
+            } catch {}
           }
         });
         incoming.once('aborted', () => {
           if (recordedFailure || completed || clientAborted) return;
-          this.balancer.failure(route, upstream);
+          try { this.balancer.failure(route, upstream); } catch {}
           recordedFailure = true;
-          terminate(502, 'Incomplete upstream response');
+          try { terminate(502, 'Incomplete upstream response'); } catch {}
         });
         incoming.once('error', () => {
           if (recordedFailure || completed || clientAborted) return;
-          this.balancer.failure(route, upstream);
+          try { this.balancer.failure(route, upstream); } catch {}
           recordedFailure = true;
-          terminate(502, 'Upstream stream failure');
+          try { terminate(502, 'Upstream stream failure'); } catch {}
         });
         try { incoming.pipe(response); } catch (e) { /* ignore */ }
       });
       currentRequest = outbound;
       activeTimer = setTimeout(() => {
-        try { outbound.destroy(new Error('Upstream timeout')); } catch {}
+        try {
+          if (headersReceived || completed || response.headersSent || response.destroyed) return;
+          outbound.destroy(new Error('Upstream timeout'));
+        } catch {}
       }, timeouts.request);
       outbound.once('error', () => {
+        if (completed || response.destroyed) return;
         if (!headersReceived) {
-          fail();
+          try { fail(); } catch {}
           return;
         }
-        if (completed || clientAborted) return;
+        if (clientAborted) return;
         if (!recordedFailure) {
-          recordedFailure = true;
-          this.balancer.failure(route, upstream);
+          try { recordedFailure = true; this.balancer.failure(route, upstream); } catch {}
         }
-        try { terminate(502, 'Upstream connection failure'); } catch {}
+        if (response.headersSent) {
+          try { finish(); response.destroy(); } catch {}
+        } else {
+          try { terminate(502, 'Upstream connection failure'); } catch {}
+        }
       });
       outbound.once('close', () => {
-        if (!headersReceived && !recordedFailure && !completed && !clientAborted) fail();
+        if (completed || response.headersSent || response.destroyed) return;
+        if (!headersReceived && !recordedFailure && !clientAborted) {
+          try { fail(); } catch {}
+        }
       });
-      if (replayable) outbound.end();
-      else request.pipe(outbound);
+      if (replayable) {
+        try { outbound.end(); } catch {}
+      } else {
+        request.once('error', () => {
+          try { outbound.destroy(); } catch {}
+        });
+        try { request.pipe(outbound); } catch {}
+      }
     };
 
     response.once('finish', finish);
     response.once('close', () => {
-      if (!response.writableEnded) {
+      if (!response.writableEnded && !completed) {
         clientAborted = true;
-        currentRequest?.destroy();
+        try { currentRequest?.destroy(); } catch {}
       }
       finish();
     });
     request.once('aborted', () => {
       clientAborted = true;
-      currentRequest?.destroy();
+      try { currentRequest?.destroy(); } catch {}
       finish();
     });
     attempt();
