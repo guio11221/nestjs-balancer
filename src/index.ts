@@ -3,7 +3,35 @@ export { RouteBalancerService } from './balancer.service';
 export { RouteBalancerMiddleware } from './proxy/middleware';
 export { selectUpstream, registerStrategy } from './strategies/select';
 export { sanitizeHeaders } from './proxy/headers';
-export type { RouteBalancerOptions, RouteBalancerAsyncOptions, RouteOptions, RetryOptions, CircuitBreakerOptions, UpstreamOptions, HealthCheckOptions, BalancingStrategy, BalancerStrategy, UpstreamState, RouteState, BalancerMetrics } from './types';
+export type {
+  RouteBalancerOptions,
+  RouteBalancerAsyncOptions,
+  RouteBalancerPluginRegistrationOptions,
+  RouteBalancerPlugin,
+  RouteBalancerRequestContext,
+  RouteBalancerRequestDecision,
+  RequestInterceptionOptions,
+  RouteOptions,
+  RetryOptions,
+  CircuitBreakerOptions,
+  BulkheadOptions,
+  RateLimitOptions,
+  RateLimitDecision,
+  CacheOptions,
+  OutlierDetectionOptions,
+  SsrfOptions,
+  StickyOptions,
+  TimeoutsOptions,
+  RequestCompleteEvent,
+  UpstreamOptions,
+  HealthCheckOptions,
+  BalancingStrategy,
+  BalancerStrategy,
+  UpstreamState,
+  RouteState,
+  BalancerMetrics,
+  RuntimeRouteReloadResult,
+} from './types';
 
 export { prometheusMetrics } from './telemetry/prometheus';
 export { attachFastifyBalancer } from './adapters/fastify';

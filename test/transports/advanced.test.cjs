@@ -21,7 +21,7 @@ test("prometheus escapes untrusted route labels and exposes counters", () => {
   const body = prometheusMetrics({
     routes: [
       {
-        path: '/evil"\nnext',
+        path: '/evil"\nnext\rline',
         upstreams: [
           {
             url: "http://localhost:3000",
@@ -37,7 +37,7 @@ test("prometheus escapes untrusted route labels and exposes counters", () => {
     ],
   });
   assert.match(body, /route_balancer_upstream_requests_total/);
-  assert.match(body, /route="\/evil\\"\\nnext"/);
+  assert.match(body, /route="\/evil\\"\\nnext\\rline"/);
   assert.match(body, /upstream_healthy.* 1/);
 });
 test("fastify hook ignores unmatched routes and hijacks matching routes", () => {
@@ -80,6 +80,53 @@ test("fastify hook ignores unmatched routes and hijacks matching routes", () => 
     () => done++,
   );
   assert.deepEqual([done, hijack, calls], [2, 1, 1]);
+});
+test('fastify hook terminates an unexpected middleware rejection', async () => {
+  let hook;
+  attachFastifyBalancer(
+    {
+      addHook: (_, callback) => {
+        hook = callback;
+      },
+    },
+    { findRoute: () => true },
+    {
+      use: async () => {
+        throw new Error('boom');
+      },
+    },
+  );
+  let status;
+  let body;
+  const raw = {
+    destroyed: false,
+    headersSent: false,
+    writeHead(value) {
+      status = value;
+      this.headersSent = true;
+    },
+    end(value) {
+      body = value;
+    },
+    destroy() {
+      this.destroyed = true;
+    },
+  };
+  let hijacked = 0;
+  hook(
+    { raw: { url: '/api' } },
+    {
+      raw,
+      hijack() {
+        hijacked++;
+      },
+    },
+    () => {},
+  );
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(hijacked, 1);
+  assert.equal(status, 500);
+  assert.equal(JSON.parse(body).statusCode, 500);
 });
 test("HTTP/2 h2c forwards headers, body, and route prefix", async () => {
   const upstream = http2.createServer();
@@ -257,6 +304,129 @@ test("HTTP/2 rejects unmatched routes without acquiring upstream", async () => {
     balancer.onModuleDestroy();
   }
 });
+test("HTTP/2 reuses upstream sessions across streams", async () => {
+  let sessions = 0;
+  const upstream = http2.createServer();
+  upstream.on("session", (session) => {
+    sessions++;
+    session.on("error", () => {});
+  });
+  upstream.on("stream", (stream) => {
+    stream.respond({ ":status": 200, "content-type": "text/plain" });
+    stream.end("ok");
+  });
+  const origin = await listen(upstream);
+  const balancer = new RouteBalancerService({
+    routes: [{ path: "/api", upstreams: [origin] }],
+  });
+  const proxy = createHttp2Balancer(balancer);
+  const endpoint = await listen(proxy);
+  const session = http2.connect(endpoint);
+  const call = () => new Promise((resolve, reject) => {
+    const req = session.request({ ":method": "GET", ":path": "/api" });
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.once("end", () => resolve(body));
+    req.once("error", reject);
+    req.end();
+  });
+  try {
+    assert.equal(await call(), "ok");
+    assert.equal(await call(), "ok");
+    assert.equal(sessions, 1);
+    assert.equal(balancer.metrics().routes[0].upstreams[0].active, 0);
+  } finally {
+    session.close();
+    await close(proxy);
+    await close(upstream);
+    balancer.onModuleDestroy();
+  }
+});
+
+test("WebSocket releases the upstream when the handshake is rejected", async () => {
+  const upstream = http.createServer();
+  upstream.on("upgrade", (req, socket) => {
+    socket.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+  });
+  const origin = await listen(upstream);
+  const balancer = new RouteBalancerService({
+    routes: [{ path: "/ws", upstreams: [origin] }],
+  });
+  const proxy = http.createServer();
+  const dispose = attachWebSocketBalancer(proxy, balancer);
+  const endpoint = await listen(proxy);
+  try {
+    const url = new URL(endpoint);
+    const status = await new Promise((resolve, reject) => {
+      const req = http.request({
+        host: url.hostname,
+        port: url.port,
+        path: "/ws",
+        headers: { Connection: "Upgrade", Upgrade: "websocket" },
+      });
+      req.once("response", (res) => {
+        res.resume();
+        resolve(res.statusCode);
+      });
+      req.once("error", reject);
+      req.end();
+    });
+    assert.equal(status, 403);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(balancer.metrics().routes[0].upstreams[0].active, 0);
+  } finally {
+    dispose();
+    await close(proxy);
+    await close(upstream);
+    balancer.onModuleDestroy();
+  }
+});
+
+test("WebSocket idle timeout closes an upgraded connection", async () => {
+  const backendSockets = new Set();
+  const upstream = http.createServer();
+  upstream.on("upgrade", (req, socket) => {
+    backendSockets.add(socket);
+    socket.once("close", () => backendSockets.delete(socket));
+    socket.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
+    socket.resume();
+  });
+  const origin = await listen(upstream);
+  const balancer = new RouteBalancerService({
+    routes: [{ path: "/ws", upstreams: [origin], timeouts: { idleTimeoutMs: 60 } }],
+  });
+  const proxy = http.createServer();
+  const dispose = attachWebSocketBalancer(proxy, balancer);
+  const endpoint = await listen(proxy);
+  try {
+    const url = new URL(endpoint);
+    const started = Date.now();
+    await new Promise((resolve, reject) => {
+      const req = http.request({
+        host: url.hostname,
+        port: url.port,
+        path: "/ws",
+        headers: { Connection: "Upgrade", Upgrade: "websocket" },
+      });
+      req.once("upgrade", (_res, socket) => {
+        socket.once("close", resolve);
+        socket.resume();
+      });
+      req.once("error", reject);
+      req.end();
+    });
+    assert.ok(Date.now() - started < 1000);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(balancer.metrics().routes[0].upstreams[0].active, 0);
+  } finally {
+    dispose();
+    for (const socket of backendSockets) socket.destroy();
+    await close(proxy);
+    await close(upstream);
+    balancer.onModuleDestroy();
+  }
+});
+
 test("WebSocket rejects unmatched upgrade requests", async () => {
   const balancer = new RouteBalancerService({
     routes: [{ path: "/ws", upstreams: ["http://127.0.0.1:12345"] }],

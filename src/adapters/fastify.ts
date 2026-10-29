@@ -17,9 +17,28 @@ export function attachFastifyBalancer(
     catch { done(); return; }
     if (!balancer.findRoute(pathname)) { done(); return; }
     reply.hijack();
-    middleware.use(request.raw, reply.raw, (error?: unknown) => {
+    const handled = middleware.use(request.raw, reply.raw, (error?: unknown) => {
       if (error === undefined || error === null) done();
       else done(error instanceof Error ? error : new Error(String(error)));
     });
+    // The middleware owns the response after hijack; unexpected rejections must
+    // still terminate it instead of surfacing as an unhandled promise rejection.
+    if (handled && typeof handled.catch === 'function') {
+      void handled.catch(() => {
+        if (reply.raw.destroyed) return;
+        if (reply.raw.headersSent) {
+          reply.raw.destroy();
+          return;
+        }
+        const body = JSON.stringify({ statusCode: 500, message: 'Internal balancer error' });
+        reply.raw.writeHead(500, {
+          'content-type': 'application/json; charset=utf-8',
+          'content-length': Buffer.byteLength(body),
+          'cache-control': 'no-store',
+          connection: 'close',
+        });
+        reply.raw.end(body);
+      });
+    }
   });
 }

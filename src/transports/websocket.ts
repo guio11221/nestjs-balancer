@@ -3,7 +3,7 @@ import { request as httpsRequest } from 'node:https';
 import type { Socket } from 'node:net';
 import { TLSSocket } from 'node:tls';
 import type { RouteBalancerService } from '../balancer.service';
-import { sanitizeHeaders } from '../proxy/headers';
+import { applyForwardedHeaders, sanitizeHeaders } from '../proxy/headers';
 
 /** HTTP/1.1 WebSocket upgrade tunneling. Does not parse WebSocket frames. */
 export function attachWebSocketBalancer(server: Server, balancer: RouteBalancerService): () => void {
@@ -32,9 +32,13 @@ export function attachWebSocketBalancer(server: Server, balancer: RouteBalancerS
     let settled = false;
     let outgoing: ClientRequest | undefined;
     let timeout: NodeJS.Timeout | undefined;
+    let idleTimer: NodeJS.Timeout | undefined;
+    const idleTimeoutMs = route.config.timeouts?.idleTimeoutMs ?? route.config.timeoutMs ?? 30000;
     const release = (): void => {
       if (released) return;
       released = true;
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = undefined;
       sockets.delete(client);
       balancer.release(upstream);
     };
@@ -52,24 +56,12 @@ export function attachWebSocketBalancer(server: Server, balancer: RouteBalancerS
     headers.connection = 'Upgrade';
     headers.upgrade = 'websocket';
     if (route.config.changeOrigin ?? true) headers.host = destination.host;
-    if (!balancer.options.trustProxy) {
-      delete headers['x-forwarded-for'];
-      delete headers['x-forwarded-host'];
-      delete headers['x-forwarded-proto'];
-      delete headers.forwarded;
-    }
-    const remoteAddress = request.socket.remoteAddress;
-    const existingFor = headers['x-forwarded-for'];
-    if (remoteAddress) {
-      headers['x-forwarded-for'] = typeof existingFor === 'string' ? `${existingFor}, ${remoteAddress}` : remoteAddress;
-    }
-    const protocol = request.socket instanceof TLSSocket && request.socket.encrypted ? 'https' : 'http';
-    headers['x-forwarded-host'] = balancer.options.trustProxy
-      ? (headers['x-forwarded-host'] ?? request.headers.host ?? '')
-      : (request.headers.host ?? '');
-    headers['x-forwarded-proto'] = balancer.options.trustProxy
-      ? (headers['x-forwarded-proto'] ?? protocol)
-      : protocol;
+    applyForwardedHeaders(headers, {
+      trustProxy: balancer.options.trustProxy ?? false,
+      remoteAddress: request.socket.remoteAddress,
+      protocol: request.socket instanceof TLSSocket && request.socket.encrypted ? 'https' : 'http',
+      host: request.headers.host,
+    });
 
     const makeRequest = destination.protocol === 'https:' ? httpsRequest : httpRequest;
     try {
@@ -78,6 +70,7 @@ export function attachWebSocketBalancer(server: Server, balancer: RouteBalancerS
         if (timeout) clearTimeout(timeout);
         response.resume();
         client.end(`HTTP/1.1 ${response.statusCode ?? 502} Upgrade Rejected\r\nConnection: close\r\n\r\n`);
+        release();
       });
     } catch {
       balancer.failure(route, upstream);
@@ -89,16 +82,30 @@ export function attachWebSocketBalancer(server: Server, balancer: RouteBalancerS
     outgoing.once('upgrade', (response, backend, backendHead) => {
       settled = true;
       if (timeout) clearTimeout(timeout);
-      balancer.success(upstream);
+      balancer.success(upstream, route);
       sockets.add(backend);
       let backendClosed = false;
       const closeBackend = (): void => {
         if (backendClosed) return;
         backendClosed = true;
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = undefined;
         sockets.delete(backend);
         if (!client.destroyed) client.destroy();
         release();
       };
+      const armIdle = (): void => {
+        if (idleTimeoutMs <= 0 || backendClosed) return;
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          if (!client.destroyed) client.destroy();
+          if (!backend.destroyed) backend.destroy();
+        }, idleTimeoutMs);
+        idleTimer.unref?.();
+      };
+      armIdle();
+      client.on('data', armIdle);
+      backend.on('data', armIdle);
       backend.once('close', closeBackend);
       backend.once('error', closeBackend);
       client.once('close', () => {

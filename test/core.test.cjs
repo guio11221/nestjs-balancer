@@ -6,6 +6,10 @@ const assert = require('node:assert/strict');
 const { selectUpstream, sanitizeHeaders, registerStrategy } = require('../dist/index.js');
 const { validateOptions, routeMatches } = require('../dist/options.js');
 const { RouteBalancerService } = require('../dist/index.js');
+const { validateUpstreamOrigin } = require('../dist/utils/ssrf.js');
+const { computeBackoff } = require('../dist/utils/backoff.js');
+const { classifyError } = require('../dist/utils/errors.js');
+const { buildStickyCookie, resolveStickyUpstream } = require('../dist/utils/sticky.js');
 
 function createRouteState(strategy = 'round-robin') {
   const options = validateOptions({
@@ -231,4 +235,134 @@ test('release clears a cancelled half-open probe', () => {
   assert.equal(service.acquire(route), node);
 
   service.onModuleDestroy();
+});
+
+test('rejects IPv6 literal private and mapped SSRF targets', () => {
+  const strict = { allowPrivate: false, allowLocalhost: false };
+  for (const origin of [
+    'http://[fd00::1]',
+    'http://[2001:db8::1]',
+    'http://[::1]',
+    'http://[::127.0.0.1]',
+    'http://[::ffff:7f00:1]',
+    'http://[::ffff:169.254.169.254]',
+    'http://0.0.0.0:1234',
+    'http://169.254.169.254',
+  ]) {
+    assert.equal(validateUpstreamOrigin(origin, strict).valid, false, origin);
+  }
+  assert.equal(validateUpstreamOrigin('http://127.0.0.1:3001', { allowPrivate: false }).valid, false);
+  assert.equal(validateUpstreamOrigin('http://[::1]', { allowPrivate: false, allowLocalhost: true }).valid, true);
+  assert.equal(validateUpstreamOrigin('http://127.0.0.1:3001', { allowPrivate: false, allowLocalhost: true }).valid, true);
+  assert.equal(validateUpstreamOrigin('http://[fd00::1]', { allowPrivate: true }).valid, true);
+  assert.equal(validateUpstreamOrigin('http://[::ffff:169.254.169.254]', { allowPrivate: false, allowLinkLocal: true }).valid, true);
+});
+
+test('SSRF options honor explicit denials, trailing dots, and host patterns', () => {
+  assert.equal(
+    validateUpstreamOrigin('http://127.0.0.1:3001', { allowPrivate: true, allowLocalhost: false }).valid,
+    false,
+    'explicit allowLocalhost:false must override allowPrivate',
+  );
+  assert.equal(
+    validateUpstreamOrigin('http://[::127.0.0.1]', { allowPrivate: true, allowLocalhost: false }).valid,
+    false,
+    'IPv4-compatible loopback must be treated as loopback',
+  );
+  assert.equal(
+    validateUpstreamOrigin('http://[::ffff:127.0.0.1]', { allowPrivate: true, allowLocalhost: false }).valid,
+    false,
+    'IPv4-mapped loopback must be treated as loopback',
+  );
+  assert.equal(
+    validateUpstreamOrigin('http://localhost:3001', { allowPrivate: true, allowLocalhost: false }).valid,
+    false,
+  );
+  assert.equal(
+    validateUpstreamOrigin('http://127.0.0.1.:3001', { allowPrivate: false, allowLocalhost: false }).valid,
+    false,
+    'a trailing dot must not bypass loopback detection',
+  );
+  assert.equal(
+    validateUpstreamOrigin('http://localhost.:3001', { allowPrivate: false, allowLocalhost: false }).valid,
+    false,
+  );
+  assert.equal(
+    validateUpstreamOrigin('http://169.254.169.254', { allowPrivate: true, allowLinkLocal: false }).valid,
+    false,
+    'explicit allowLinkLocal:false must override allowPrivate',
+  );
+  assert.equal(
+    validateUpstreamOrigin('http://169.254.169.254', { allowPrivate: true }).valid,
+    false,
+    'link-local targets require allowLinkLocal rather than allowPrivate',
+  );
+
+  assert.equal(validateUpstreamOrigin('http://api.example.com', { allowlist: ['*.example.com'] }).valid, true);
+  assert.equal(validateUpstreamOrigin('http://example.com', { allowlist: ['*.example.com'] }).valid, true);
+  assert.equal(validateUpstreamOrigin('http://example.org', { allowlist: ['*.example.com'] }).valid, false);
+  assert.equal(validateUpstreamOrigin('http://api.example.com', { allowlist: ['example.com'] }).valid, false);
+  assert.equal(validateUpstreamOrigin('http://api.evil.com', { blocklist: ['*.evil.com'] }).valid, false);
+  assert.equal(validateUpstreamOrigin('http://api.evil.com', { blocklist: ['evil.com'] }).valid, true);
+});
+
+test('consistent hashing keeps unaffected keys on their upstream', () => {
+  const route = validateOptions({
+    routes: [{
+      path: '/',
+      strategy: 'consistent-hash',
+      upstreams: ['http://127.0.0.1:3001', 'http://127.0.0.1:3002', 'http://127.0.0.1:3003'],
+    }],
+  })[0];
+  const keys = Array.from({ length: 500 }, (_, index) => `10.0.0.${index % 250}`);
+  const before = new Map(keys.map(key => [key, selectUpstream(route, route.upstreams, { socket: { remoteAddress: key } }).url]));
+  const removed = route.upstreams[2];
+  route.upstreams = route.upstreams.slice(0, 2);
+  for (const key of keys) {
+    if (before.get(key) === removed.url) continue;
+    const selected = selectUpstream(route, route.upstreams, { socket: { remoteAddress: key } });
+    assert.equal(selected.url, before.get(key), `key ${key} remapped unexpectedly`);
+  }
+});
+
+test('backoff is exponential, capped and jitter-safe', () => {
+  assert.equal(computeBackoff(25, 1, 0, 1000), 25);
+  assert.equal(computeBackoff(25, 4, 0, 1000), 200);
+  assert.equal(computeBackoff(25, 10, 0, 1000), 1000);
+  const jittered = computeBackoff(100, 3, 10, 1000);
+  assert.ok(jittered >= 390 && jittered <= 410);
+});
+
+test('classifies retry reasons from transport errors', () => {
+  assert.equal(classifyError({ code: 'ECONNECTTIMEOUT' }), 'connect');
+  assert.equal(classifyError({ code: 'ECONNREFUSED' }), 'connect');
+  assert.equal(classifyError({ code: 'ETIMEDOUT' }), 'timeout');
+  assert.equal(classifyError({ code: 'ECONNRESET' }), 'network');
+  assert.equal(classifyError(new Error('boom')), 'network');
+});
+
+test('sticky tokens are opaque, signed and reject tampering or empty values', () => {
+  const route = validateOptions({
+    routes: [{ path: '/api', upstreams: ['http://127.0.0.1:3001', 'http://127.0.0.1:3002'], sticky: { cookie: 'lb', ttlMs: 60000, sameSite: 'strict' } }],
+  })[0];
+  const options = route.config.sticky;
+  const cookie = buildStickyCookie(route, route.upstreams[1].url, options, 'secret');
+  assert.equal(cookie.includes('127.0.0.1'), false);
+  assert.match(cookie, /SameSite=Strict/);
+  assert.match(cookie, /HttpOnly/);
+  const pair = cookie.split(';')[0];
+  assert.equal(resolveStickyUpstream(route, pair, options, 'secret'), route.upstreams[1].url);
+  assert.equal(resolveStickyUpstream(route, 'lb=', options, 'secret'), undefined);
+  assert.equal(resolveStickyUpstream(route, 'lb=deadbeef', options, 'secret'), undefined);
+  assert.equal(resolveStickyUpstream(route, pair, options, 'other-secret'), undefined);
+});
+
+test('retry budget blocks retries at rate zero and allows them otherwise', () => {
+  const blocked = new RouteBalancerService({ routes: [{ path: '/', upstreams: ['http://127.0.0.1:1'], retry: { maxRetryRate: 0 } }] });
+  assert.equal(blocked.tryReserveRetry(blocked.routes[0]), false);
+  blocked.onModuleDestroy();
+
+  const allowed = new RouteBalancerService({ routes: [{ path: '/', upstreams: ['http://127.0.0.1:1'], retry: { maxRetryRate: 1 } }] });
+  assert.equal(allowed.tryReserveRetry(allowed.routes[0]), true);
+  allowed.onModuleDestroy();
 });

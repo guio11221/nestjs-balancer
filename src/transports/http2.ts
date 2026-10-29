@@ -14,7 +14,20 @@ function allowed(headers: IncomingHttpHeaders): Record<string, string | string[]
 /** h2c-to-h2c transport. Intended for internal gRPC and HTTP/2 services. */
 export function createHttp2Balancer(balancer: RouteBalancerService): Http2Server {
   const server = createServer();
-  const sessions = new Set<ClientHttp2Session>();
+  const sessions = new Map<string, ClientHttp2Session>();
+
+  const getSession = (origin: string): ClientHttp2Session => {
+    const existing = sessions.get(origin);
+    if (existing && !existing.closed && !existing.destroyed) return existing;
+    const session = connect(origin);
+    sessions.set(origin, session);
+    const forget = (): void => {
+      if (sessions.get(origin) === session) sessions.delete(origin);
+    };
+    session.once('close', forget);
+    session.once('error', forget);
+    return session;
+  };
   server.on('stream', (stream: ServerHttp2Stream, headers: IncomingHttpHeaders) => {
     let requestUrl: URL;
     try {
@@ -45,7 +58,7 @@ export function createHttp2Balancer(balancer: RouteBalancerService): Http2Server
     }
     let session: ClientHttp2Session;
     try {
-      session = connect(target.origin);
+      session = getSession(target.origin);
     } catch {
       balancer.failure(route, node);
       balancer.release(node);
@@ -53,7 +66,6 @@ export function createHttp2Balancer(balancer: RouteBalancerService): Http2Server
       stream.end();
       return;
     }
-    sessions.add(session);
     let proxyStream: ClientHttp2Stream | undefined;
     let upstreamTrailers: Record<string, string | string[]> | undefined;
     let finished = false;
@@ -61,8 +73,6 @@ export function createHttp2Balancer(balancer: RouteBalancerService): Http2Server
       if (finished) return;
       finished = true;
       balancer.release(node);
-      sessions.delete(session);
-      session.close();
     };
     const fail = (): void => {
       if (finished) return;
@@ -76,8 +86,6 @@ export function createHttp2Balancer(balancer: RouteBalancerService): Http2Server
       if (proxyStream && !proxyStream.destroyed) proxyStream.close();
       cleanup();
     };
-    session.once('error', fail);
-    session.once('close', () => sessions.delete(session));
     const rewritten = route.config.stripPrefix ? (requestUrl.pathname.slice(route.path === '/' ? 0 : route.path.length) || '/') : requestUrl.pathname;
     try {
       proxyStream = session.request({
@@ -93,7 +101,9 @@ export function createHttp2Balancer(balancer: RouteBalancerService): Http2Server
     }
     proxyStream.on('response', responseHeaders => {
       if (stream.destroyed) return;
-      stream.respond({ ...allowed(responseHeaders), ':status': responseHeaders[':status'] ?? 502 }, { waitForTrailers: true });
+      const status = Number(responseHeaders[':status'] ?? 502);
+      balancer.observeStatus(route, node, status);
+      stream.respond({ ...allowed(responseHeaders), ':status': status }, { waitForTrailers: true });
     });
     proxyStream.on('trailers', trailers => {
       upstreamTrailers = allowed(trailers);
@@ -103,7 +113,7 @@ export function createHttp2Balancer(balancer: RouteBalancerService): Http2Server
     });
     proxyStream.once('end', () => {
       if (finished) return;
-      balancer.success(node);
+      balancer.success(node, route);
       cleanup();
     });
     proxyStream.once('error', fail);
@@ -115,6 +125,9 @@ export function createHttp2Balancer(balancer: RouteBalancerService): Http2Server
     stream.pipe(proxyStream);
     proxyStream.pipe(stream);
   });
-  server.once('close', () => { for (const session of sessions) session.destroy(); });
+  server.once('close', () => {
+    for (const session of sessions.values()) session.destroy();
+    sessions.clear();
+  });
   return server;
 }
