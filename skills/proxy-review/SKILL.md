@@ -2,7 +2,7 @@
 
 Use when changing `src/proxy` or HTTP forwarding behavior.
 
-1. Read `docs/ARCHITECTURE.md` and `docs/SECURITY-HARDENING.md`.
+1. Read `docs/reference/architecture.md` and `docs/operations/security-hardening.md`.
 2. Verify body backpressure, cancellation, stream completion, and one-time release on every branch.
 3. Strip static hop-by-hop headers and dynamic `Connection` tokens, for both request and response.
 4. Never replay non-idempotent methods. Restrict retries to bodyless GET/HEAD before response headers.

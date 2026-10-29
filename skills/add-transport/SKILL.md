@@ -6,5 +6,5 @@
 4. Prohibit unsafe retries after request body forwarding or response headers transmission.
 5. Add tests for handshake, payload, client abort, upstream abort, target unavailable, resource cleanup and graceful shutdown.
 6. For gRPC, test grpc-status/trailers, deadlines, TLS, cancellation and unary/client/server/bidirectional streaming before declaring support.
-7. Provide standalone example and update docs/TRANSPORTS.md for new adapters.
+7. Provide standalone example and update docs/guides/transports.md for new adapters.
 8. Require npm run check with installed dependencies; transpilation alone does not prove type safety.

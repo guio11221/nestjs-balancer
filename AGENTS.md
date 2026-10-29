@@ -16,5 +16,6 @@ This is a TypeScript NestJS HTTP/1.x Express reverse proxy package, not a univer
 - Keep code formatted consistently with two-space indentation and full TypeScript types.
 - Preserve public exports and semver compatibility; changing option names requires a migration guide.
 - Never report test success unless the command executed successfully.
-- Read `docs/ARCHITECTURE.md` before modifying transport or selection logic.
+- Read `docs/reference/architecture.md` before modifying transport or selection logic.
+- Read `docs/reference/configuration.md` before adding options, and document defaults and validation there.
 - Read `skills/proxy-review/SKILL.md` for HTTP proxy changes and `skills/integration-tests/SKILL.md` before changing tests.

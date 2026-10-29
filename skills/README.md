@@ -9,6 +9,7 @@ This directory contains development playbooks for assistants/agents and human ma
 - `testing` — unit/integration/failure testing
 - `add-adapter` — Express/Fastify/protocol integration rules
 - `security-review` — threats and review checklist
+- `plugins` — NestJS DI plugin contracts, request interception, isolation, cancellation and security tests
 - `release` — npm release process
 
 Read `AGENTS.md` first and do not claim unsupported capabilities.
