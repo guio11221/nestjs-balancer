@@ -1,7 +1,7 @@
 {
   "name": "nestjs-balancer",
-  "version": "0.4.0",
-  "description": "NestJS route load balancer: HTTP/1.1 proxy, WebSocket upgrade, h2c gateway, circuit breaker and metrics",
+  "version": "0.9.0",
+  "description": "NestJS route load balancer: HTTP/1.1 proxy, opt-in WebSocket/h2c transports, sticky sessions, outlier detection, circuit breaker and metrics",
   "license": "MIT",
   "author": "Community",
   "keywords": [
@@ -49,7 +49,7 @@
     "prepublishOnly": "npm run check",
     "pack:check": "npm pack --dry-run",
     "test:integration": "node --test test/integration/*.test.cjs",
-    "test:unit": "node --test test/*.test.cjs",
+    "test:unit": "node --test test/*.test.cjs test/unit/*.test.cjs",
     "test:transport": "node --test test/transports/*.test.cjs"
   },
   "peerDependencies": {
@@ -57,10 +57,10 @@
     "@nestjs/core": "^10.0.0 || ^11.0.0",
     "reflect-metadata": "^0.1.13 || ^0.2.0"
   },
-  "dependencies": {},
   "devDependencies": {
     "@nestjs/common": "^11.0.0",
     "@nestjs/core": "^11.0.0",
+    "@nestjs/platform-express": "^11.2.8",
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
     "express": "^5.0.0",
