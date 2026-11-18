@@ -202,3 +202,27 @@ test('validates retry budget, timeouts and sticky cookie names', () => {
     /Invalid sticky cookie/,
   );
 });
+
+test('rejects invalid health-check header names before starting probes', () => {
+  const route = (headers) => ({
+    path: '/api',
+    upstreams: ['http://localhost:3001'],
+    healthCheck: { path: '/health', intervalMs: 1000, headers },
+  });
+
+  for (const name of ['x bad', 'x:bad', 'x\\r\\nInjected', '']) {
+    assert.throws(
+      () => validate({ routes: [route({ [name]: 'value' })] }),
+      /Invalid healthCheck headers/,
+    );
+  }
+
+  assert.throws(
+    () => validate({ routes: [route({ ['x'.repeat(257)]: 'value' })] }),
+    /Invalid healthCheck headers/,
+  );
+
+  assert.doesNotThrow(() => validate({
+    routes: [route({ 'x-health-check': 'ready', authorization: 'Bearer token' })],
+  }));
+});
