@@ -146,7 +146,7 @@ function validateHealthHeaders(headers: any): void {
   if (headers === undefined) return;
   if (typeof headers !== 'object' || headers === null || Array.isArray(headers)) throw new Error('Invalid healthCheck headers');
   for (const [name, value] of Object.entries(headers)) {
-    if (!name || typeof value !== 'string' || /[\r\n]/.test(value)) throw new Error('Invalid healthCheck headers');
+    if (name.length > 256 || !HEADER_NAME_PATTERN.test(name) || typeof value !== 'string' || /[\r\n]/.test(value)) throw new Error('Invalid healthCheck headers');
   }
 }
 
